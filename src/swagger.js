@@ -4,7 +4,7 @@ const spec = {
     title: "umirovatm.uz API",
     version: "1.0.0",
   },
-  servers: [{ url: "http://localhost:4000/api" }],
+  servers: [{ url: "https://tyutorkpi.sies.uz/umirov/api" }],
   components: {
     securitySchemes: {
       bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "JWT" },

@@ -25,8 +25,8 @@ const config = {
     accessTtl: process.env.ACCESS_TOKEN_TTL || "15m",
     refreshTtlDays: Number(process.env.REFRESH_TOKEN_TTL_DAYS || 7),
   },
-  clientOrigin: process.env.CLIENT_ORIGIN || "http://localhost:3000",
-  serverUrl: process.env.SERVER_URL || "http://localhost:4000",
+  clientOrigin: process.env.CLIENT_ORIGIN || "https://tyutorkpi.sies.uz",
+  serverUrl: process.env.SERVER_URL || "https://tyutorkpi.sies.uz/umirov",
   telegram: {
     token: process.env.TELEGRAM_BOT_TOKEN || "",
     chatIds: parseCsv(process.env.TELEGRAM_CHAT_IDS),

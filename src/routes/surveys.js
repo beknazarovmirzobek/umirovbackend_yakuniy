@@ -7,6 +7,44 @@ const { requireAuth, requireRole } = require("../middleware/auth");
 
 const router = express.Router();
 const SUPERADMIN_TEACHER_USERNAME = "teacher";
+let ensureSurveysSchemaPromise;
+
+async function ensureSurveysSchema() {
+  if (!ensureSurveysSchemaPromise) {
+    ensureSurveysSchemaPromise = (async () => {
+      const columns = await query("SHOW COLUMNS FROM surveys");
+      const columnMap = new Map(columns.map((column) => [column.Field, column]));
+
+      if (!columnMap.has("is_anonymous")) {
+        await query(
+          "ALTER TABLE surveys ADD COLUMN is_anonymous TINYINT(1) NOT NULL DEFAULT 0 AFTER deadline"
+        );
+      }
+
+      if (!columnMap.has("target_type")) {
+        await query(
+          "ALTER TABLE surveys ADD COLUMN target_type ENUM('GROUP','STUDENT') NULL AFTER questions"
+        );
+      }
+
+      if (!columnMap.has("target_id")) {
+        await query(
+          "ALTER TABLE surveys ADD COLUMN target_id CHAR(36) NULL AFTER target_type"
+        );
+      }
+
+      const subjectColumn = columnMap.get("subject_id");
+      if (subjectColumn?.Null !== "YES") {
+        await query("ALTER TABLE surveys MODIFY COLUMN subject_id CHAR(36) NULL");
+      }
+    })().catch((err) => {
+      ensureSurveysSchemaPromise = null;
+      throw err;
+    });
+  }
+
+  await ensureSurveysSchemaPromise;
+}
 
 const questionSchema = z
   .object({
@@ -104,6 +142,7 @@ function canManageSurvey(survey, user) {
 }
 
 async function getSurveyById(id) {
+  await ensureSurveysSchema();
   const rows = await query(
     "SELECT s.*, u.first_name AS teacher_first_name, u.last_name AS teacher_last_name FROM surveys s JOIN users u ON u.id = s.teacher_id WHERE s.id = ?",
     [id]
@@ -127,6 +166,7 @@ async function canStudentAccessSurvey(survey, studentId) {
 
 router.get("/", requireAuth, requireRole("TEACHER"), async (req, res, next) => {
   try {
+    await ensureSurveysSchema();
     const rows = isSuperAdmin(req.user)
       ? await query(
           "SELECT s.*, u.first_name AS teacher_first_name, u.last_name AS teacher_last_name, (SELECT COUNT(*) FROM survey_responses sr WHERE sr.survey_id = s.id) AS response_count FROM surveys s JOIN users u ON u.id = s.teacher_id ORDER BY s.created_at DESC"
@@ -143,6 +183,7 @@ router.get("/", requireAuth, requireRole("TEACHER"), async (req, res, next) => {
 
 router.post("/", requireAuth, requireRole("TEACHER"), async (req, res, next) => {
   try {
+    await ensureSurveysSchema();
     const body = createSchema.parse(req.body);
     const id = uuid();
     await query(
@@ -169,6 +210,7 @@ router.post("/", requireAuth, requireRole("TEACHER"), async (req, res, next) => 
 
 router.get("/available", requireAuth, requireRole("STUDENT"), async (req, res, next) => {
   try {
+    await ensureSurveysSchema();
     const rows = await query(
       "SELECT s.*, u.first_name AS teacher_first_name, u.last_name AS teacher_last_name, sr.id AS response_id, sr.submitted_at AS responded_at FROM surveys s JOIN users u ON u.id = s.teacher_id LEFT JOIN group_members gm ON gm.group_id = s.target_id AND gm.student_id = ? LEFT JOIN survey_responses sr ON sr.survey_id = s.id AND sr.student_id = ? WHERE (s.target_type IS NULL) OR (s.target_type = 'GROUP' AND gm.student_id IS NOT NULL) OR (s.target_type = 'STUDENT' AND s.target_id = ?) ORDER BY s.created_at DESC",
       [req.user.sub, req.user.sub, req.user.sub]
@@ -217,6 +259,7 @@ router.get("/:id/responses", requireAuth, requireRole("TEACHER"), async (req, re
 
 router.put("/:id", requireAuth, requireRole("TEACHER"), async (req, res, next) => {
   try {
+    await ensureSurveysSchema();
     const survey = await getSurveyById(req.params.id);
     if (!survey) return res.status(404).json({ message: "Survey not found" });
     if (!canManageSurvey(survey, req.user)) {

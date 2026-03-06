@@ -54,8 +54,8 @@ FROM subjects s JOIN users u ON u.username='teacher' LIMIT 1 OFFSET 2;
 INSERT INTO assignments (id, subject_id, teacher_id, title, description, deadline, max_score, attachments, target_type, target_id)
 SELECT UUID(), s.id, u.id, 'Linear regression lab', 'Submit analysis with charts and summary.', NOW() + INTERVAL 5 DAY, 100,
   JSON_ARRAY(
-  JSON_OBJECT('id', UUID(), 'name','dataset.csv','mimeType','text/csv','sizeKb',420,'kind','document','url','http://localhost:4000/uploads/dataset.csv'),
-  JSON_OBJECT('id', UUID(), 'name','lab-instructions.pdf','mimeType','application/pdf','sizeKb',860,'kind','document','url','http://localhost:4000/uploads/lab-instructions.pdf')
+  JSON_OBJECT('id', UUID(), 'name','dataset.csv','mimeType','text/csv','sizeKb',420,'kind','document','url','https://tyutorkpi.sies.uz/umirov/uploads/dataset.csv'),
+  JSON_OBJECT('id', UUID(), 'name','lab-instructions.pdf','mimeType','application/pdf','sizeKb',860,'kind','document','url','https://tyutorkpi.sies.uz/umirov/uploads/lab-instructions.pdf')
 ),
 'GROUP', g.id
 FROM subjects s JOIN users u ON u.username='teacher'
@@ -64,8 +64,8 @@ JOIN `groups` g ON g.code='G-A' LIMIT 1;
 INSERT INTO assignments (id, subject_id, teacher_id, title, description, deadline, max_score, attachments, target_type, target_id)
 SELECT UUID(), s.id, u.id, 'Prototype critique', 'Upload critique with insights.', NOW() - INTERVAL 1 DAY, 100,
   JSON_ARRAY(
-  JSON_OBJECT('id', UUID(), 'name','ux-critique-guide.docx','mimeType','application/vnd.openxmlformats-officedocument.wordprocessingml.document','sizeKb',320,'kind','document','url','http://localhost:4000/uploads/ux-critique-guide.docx'),
-  JSON_OBJECT('id', UUID(), 'name','critique-session.mp4','mimeType','video/mp4','sizeKb',12450,'kind','video','url','http://localhost:4000/uploads/critique-session.mp4')
+  JSON_OBJECT('id', UUID(), 'name','ux-critique-guide.docx','mimeType','application/vnd.openxmlformats-officedocument.wordprocessingml.document','sizeKb',320,'kind','document','url','https://tyutorkpi.sies.uz/umirov/uploads/ux-critique-guide.docx'),
+  JSON_OBJECT('id', UUID(), 'name','critique-session.mp4','mimeType','video/mp4','sizeKb',12450,'kind','video','url','https://tyutorkpi.sies.uz/umirov/uploads/critique-session.mp4')
 ),
 'STUDENT', u2.id
 FROM subjects s JOIN users u ON u.username='teacher'
@@ -75,7 +75,7 @@ LIMIT 1 OFFSET 1;
 INSERT INTO assignments (id, subject_id, teacher_id, title, description, deadline, max_score, attachments, target_type, target_id)
 SELECT UUID(), s.id, u.id, 'Essay outline', 'Submit outline and thesis.', NOW() + INTERVAL 10 DAY, 100,
   JSON_ARRAY(
-  JSON_OBJECT('id', UUID(), 'name','outline-template.pptx','mimeType','application/vnd.openxmlformats-officedocument.presentationml.presentation','sizeKb',540,'kind','slides','url','http://localhost:4000/uploads/outline-template.pptx')
+  JSON_OBJECT('id', UUID(), 'name','outline-template.pptx','mimeType','application/vnd.openxmlformats-officedocument.presentationml.presentation','sizeKb',540,'kind','slides','url','https://tyutorkpi.sies.uz/umirov/uploads/outline-template.pptx')
 ),
 'GROUP', g.id
 FROM subjects s JOIN users u ON u.username='teacher'

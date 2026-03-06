@@ -3,6 +3,7 @@ const path = require("path");
 const cors = require("cors");
 const morgan = require("morgan");
 const swaggerUi = require("swagger-ui-express");
+const { ZodError } = require("zod");
 
 const swaggerSpec = require("./swagger");
 
@@ -44,6 +45,23 @@ app.use("/api/teacher", teacherRoutes);
 app.use("/api/student", studentRoutes);
 
 app.use((err, req, res, next) => {
+  if (err instanceof ZodError) {
+    return res.status(400).json({
+      message: err.issues[0]?.message || "Validation error",
+      issues: err.issues.map((issue) => ({
+        path: issue.path,
+        message: issue.message,
+      })),
+    });
+  }
+
+  if (err?.code === "ER_BAD_FIELD_ERROR" || err?.code === "ER_NO_SUCH_TABLE") {
+    console.error("Database schema mismatch:", err);
+    return res.status(500).json({
+      message: "Database schema is outdated. Run the latest schema updates.",
+    });
+  }
+
   console.error(err);
   res.status(500).json({ message: "Server error" });
 });
