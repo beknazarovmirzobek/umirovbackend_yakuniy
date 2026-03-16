@@ -6,6 +6,8 @@ const swaggerUi = require("swagger-ui-express");
 const { ZodError } = require("zod");
 
 const swaggerSpec = require("./swagger");
+const config = require("./config");
+const { isDatabaseConnectionError } = require("./db");
 
 const authRoutes = require("./routes/auth");
 const fileRoutes = require("./routes/files");
@@ -59,6 +61,13 @@ app.use((err, req, res, next) => {
     console.error("Database schema mismatch:", err);
     return res.status(500).json({
       message: "Database schema is outdated. Run the latest schema updates.",
+    });
+  }
+
+  if (isDatabaseConnectionError(err)) {
+    console.error("Database unavailable:", err);
+    return res.status(503).json({
+      message: `Database unavailable at ${config.db.host}:${config.db.port}/${config.db.database}. Start MySQL and import backend/schema.sql.`,
     });
   }
 

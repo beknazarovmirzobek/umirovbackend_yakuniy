@@ -261,13 +261,20 @@ async function seed() {
   );
 
   await query(
-    "INSERT INTO test_attempts (id, test_id, student_id, answers, score, submitted_at) VALUES (?,?,?,?,?,?)",
+    "INSERT INTO test_attempts (id, test_id, student_id, attempt_number, answers, question_order, option_orders, score, correct_count, question_count, percentage, passed, submitted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
     [
       uuid(),
       test1,
       studentId,
+      1,
       JSON.stringify([0, 0]),
+      JSON.stringify([0, 1]),
+      JSON.stringify([[0, 1], [0, 1]]),
       100,
+      2,
+      2,
+      100,
+      1,
       new Date(),
     ]
   );

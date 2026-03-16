@@ -1,15 +1,20 @@
 const config = require("../config");
+const { pool } = require("../db");
 const {
   ensureStudentCredentialsTable,
   listStudentCredentialsByLookup,
 } = require("./studentCredentials");
 
 const TELEGRAM_API_URL = "https://api.telegram.org";
+const POLLING_LOCK_NAME = "umirov_telegram_polling";
 
 let started = false;
+let starting = false;
 let polling = false;
 let lastUpdateId = 0;
 let pollTimer = null;
+let lockConnection = null;
+let activePollController = null;
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -108,7 +113,7 @@ function buildUsageText() {
   ].join("\n");
 }
 
-async function telegramApi(method, payload) {
+async function telegramApi(method, payload, options = {}) {
   if (!config.telegram.token) {
     throw new Error("TELEGRAM_BOT_TOKEN topilmadi.");
   }
@@ -119,6 +124,7 @@ async function telegramApi(method, payload) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      ...options,
     }
   );
 
@@ -159,6 +165,60 @@ async function sendStudentCredentials(chatId, title, student) {
   const text = buildStudentMessage(title, student);
   const keyboard = buildCopyKeyboard(student);
   await sendMessage(chatId, text, keyboard?.inline_keyboard?.length ? keyboard : null);
+}
+
+function isPollingConflictError(err) {
+  return (
+    Number(err?.code) === 409 ||
+    /terminated by other getUpdates request/i.test(String(err?.message || ""))
+  );
+}
+
+async function acquirePollingLock() {
+  if (lockConnection) return true;
+
+  const connection = await pool.getConnection();
+  try {
+    const [rows] = await connection.query("SELECT GET_LOCK(?, 0) AS acquired", [
+      POLLING_LOCK_NAME,
+    ]);
+    const acquired = Number(rows?.[0]?.acquired) === 1;
+    if (!acquired) {
+      connection.release();
+      return false;
+    }
+
+    lockConnection = connection;
+    return true;
+  } catch (err) {
+    connection.release();
+    throw err;
+  }
+}
+
+async function releasePollingLock() {
+  if (!lockConnection) return;
+
+  const connection = lockConnection;
+  lockConnection = null;
+
+  try {
+    await connection.query("SELECT RELEASE_LOCK(?)", [POLLING_LOCK_NAME]);
+  } catch (err) {
+    console.error("Telegram polling lockni bo'shatishda xatolik:", err.message);
+  } finally {
+    connection.release();
+  }
+}
+
+async function clearWebhook() {
+  try {
+    await telegramApi("deleteWebhook", {
+      drop_pending_updates: false,
+    });
+  } catch (err) {
+    console.warn("Telegram webhookni o'chirib bo'lmadi:", err.message);
+  }
 }
 
 async function handleIncomingMessage(message) {
@@ -208,11 +268,13 @@ async function pollUpdates() {
   if (!started || polling) return;
   polling = true;
   try {
+    activePollController =
+      typeof AbortController === "function" ? new AbortController() : null;
     const updates = await telegramApi("getUpdates", {
       offset: lastUpdateId,
       timeout: 25,
       allowed_updates: ["message"],
-    });
+    }, activePollController ? { signal: activePollController.signal } : {});
 
     for (const update of updates) {
       if (typeof update.update_id === "number") {
@@ -227,16 +289,31 @@ async function pollUpdates() {
       }
     }
   } catch (err) {
+    if (err?.name === "AbortError") {
+      return;
+    }
+    if (isPollingConflictError(err)) {
+      console.error(
+        "Telegram polling to'xtatildi: boshqa bot instance getUpdates ishlatyapti."
+      );
+      await stopTelegramBot();
+      return;
+    }
     console.error("Telegram polling xatoligi:", err.message);
   } finally {
+    activePollController = null;
     polling = false;
   }
 }
 
-function startTelegramBot() {
-  if (started) return;
+async function startTelegramBot() {
+  if (started || starting) return;
   if (!config.telegram.token) {
     console.warn("TELEGRAM_BOT_TOKEN yo'q. Telegram bot ishga tushmadi.");
+    return;
+  }
+  if (!config.telegram.pollingEnabled) {
+    console.log("Telegram polling o'chirilgan. Joriy instance getUpdates ishlatmaydi.");
     return;
   }
   if (typeof fetch !== "function") {
@@ -244,18 +321,33 @@ function startTelegramBot() {
     return;
   }
 
-  started = true;
-  ensureStudentCredentialsTable().catch((err) => {
-    console.error("student_credentials jadvalini tayyorlashda xatolik:", err.message);
-  });
+  starting = true;
+  try {
+    const hasLock = await acquirePollingLock();
+    if (!hasLock) {
+      console.warn(
+        "Telegram polling boshqa backend instance tomonidan band. Joriy instance polling qilmaydi."
+      );
+      return;
+    }
 
-  void pollUpdates();
-  const interval = Math.max(1000, Number(config.telegram.pollIntervalMs || 1500));
-  pollTimer = setInterval(() => {
+    await ensureStudentCredentialsTable();
+    await clearWebhook();
+
+    started = true;
     void pollUpdates();
-  }, interval);
+    const interval = Math.max(1000, Number(config.telegram.pollIntervalMs || 1500));
+    pollTimer = setInterval(() => {
+      void pollUpdates();
+    }, interval);
 
-  console.log("Telegram bot ishga tushdi.");
+    console.log("Telegram bot ishga tushdi.");
+  } catch (err) {
+    console.error("Telegram botni ishga tushirib bo'lmadi:", err.message);
+    await releasePollingLock();
+  } finally {
+    starting = false;
+  }
 }
 
 async function sendNewStudentNotification(student) {
@@ -272,12 +364,18 @@ async function sendNewStudentNotification(student) {
   }
 }
 
-function stopTelegramBot() {
+async function stopTelegramBot() {
   if (pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;
   }
+  if (activePollController) {
+    activePollController.abort();
+    activePollController = null;
+  }
   started = false;
+  starting = false;
+  await releasePollingLock();
 }
 
 module.exports = {

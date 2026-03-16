@@ -10,6 +10,15 @@ function parseCsv(value) {
     .filter(Boolean);
 }
 
+function parseBoolean(value, defaultValue = false) {
+  if (value == null || value === "") return defaultValue;
+
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return defaultValue;
+}
+
 const config = {
   port: process.env.PORT || 4000,
   db: {
@@ -30,6 +39,7 @@ const config = {
   telegram: {
     token: process.env.TELEGRAM_BOT_TOKEN || "",
     chatIds: parseCsv(process.env.TELEGRAM_CHAT_IDS),
+    pollingEnabled: parseBoolean(process.env.TELEGRAM_BOT_POLLING_ENABLED, true),
     pollIntervalMs: Number(process.env.TELEGRAM_BOT_POLL_INTERVAL_MS || 1500),
     commandKey: process.env.TELEGRAM_BOT_COMMAND_KEY || "@umirov",
   },

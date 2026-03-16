@@ -10,6 +10,7 @@ const router = express.Router();
 const DEFAULT_RANDOM_QUESTION_COUNT = 30;
 const MAX_TEXT_ANSWER_LENGTH = 1000;
 const MAX_TIME_LIMIT_MINUTES = 720;
+const PASSING_PERCENTAGE = 60;
 const DEVICE_HEADER = "x-test-device-id";
 
 const questionContentSchema = z.union([
@@ -158,6 +159,7 @@ const grantPermissionSchema = z.object({
 
 let ensureSessionTablePromise = null;
 let ensurePermissionTablePromise = null;
+let ensureAttemptTablePromise = null;
 
 function parseJson(raw, fallback) {
   if (raw == null) return fallback;
@@ -432,6 +434,10 @@ function calculateTimeRemainingSeconds(startedAt, timeLimitMinutes) {
   return Math.max(0, Math.ceil((limitMs - elapsedMs) / 1000));
 }
 
+function getExpiredTimeLimitMessage() {
+  return "Bu test uchun vaqt tugagan. Testga kirib bo'lmaydi.";
+}
+
 function mapTest(row, includeCorrectOptions, options = {}) {
   const allQuestions = Array.isArray(options.allQuestions)
     ? options.allQuestions
@@ -473,8 +479,18 @@ function mapTest(row, includeCorrectOptions, options = {}) {
       [row.teacher_first_name, row.teacher_last_name].filter(Boolean).join(" ") || null,
     attemptCount:
       row.attempt_count == null ? undefined : Number(row.attempt_count),
+    attemptNumber:
+      row.attempt_number == null ? undefined : Math.max(1, Number(row.attempt_number) || 1),
     attemptScore:
       row.attempt_score == null ? undefined : Number(row.attempt_score),
+    correctCount:
+      row.correct_count == null ? undefined : Math.max(0, Number(row.correct_count) || 0),
+    questionCount:
+      row.question_count == null ? undefined : Math.max(0, Number(row.question_count) || 0),
+    percentage:
+      row.percentage == null ? undefined : Math.max(0, Math.min(100, Number(row.percentage) || 0)),
+    passed:
+      row.passed == null ? undefined : Boolean(Number(row.passed)),
     attemptSubmittedAt: row.attempt_submitted_at ?? undefined,
     permissionRemainingAttempts:
       typeof options.permissionRemainingAttempts === "number"
@@ -482,6 +498,8 @@ function mapTest(row, includeCorrectOptions, options = {}) {
         : row.permission_remaining_attempts == null
         ? undefined
         : Number(row.permission_remaining_attempts),
+    entryBlockedReason:
+      typeof options.entryBlockedReason === "string" ? options.entryBlockedReason : undefined,
     createdAt: row.created_at,
   };
 }
@@ -495,6 +513,18 @@ function mapAttempt(row) {
       [row.student_first_name, row.student_last_name].filter(Boolean).join(" ") || null,
     answers: parseJson(row.answers, []),
     score: Number(row.score),
+    questionOrder: parseJson(row.question_order, []),
+    optionOrders: parseJson(row.option_orders, []),
+    attemptNumber:
+      row.attempt_number == null ? undefined : Math.max(1, Number(row.attempt_number) || 1),
+    correctCount:
+      row.correct_count == null ? undefined : Math.max(0, Number(row.correct_count) || 0),
+    questionCount:
+      row.question_count == null ? undefined : Math.max(0, Number(row.question_count) || 0),
+    percentage:
+      row.percentage == null ? undefined : Math.max(0, Math.min(100, Number(row.percentage) || 0)),
+    passed:
+      row.passed == null ? undefined : Boolean(Number(row.passed)),
     submittedAt: row.submitted_at,
   };
 }
@@ -506,6 +536,15 @@ function mapPermission(row) {
       [row.student_first_name, row.student_last_name].filter(Boolean).join(" ") || null,
     remainingAttempts: Number(row.remaining_attempts || 0),
     attemptScore: row.attempt_score == null ? null : Number(row.attempt_score),
+    attemptNumber:
+      row.attempt_number == null ? null : Math.max(1, Number(row.attempt_number) || 1),
+    correctCount:
+      row.correct_count == null ? null : Math.max(0, Number(row.correct_count) || 0),
+    questionCount:
+      row.question_count == null ? null : Math.max(0, Number(row.question_count) || 0),
+    percentage:
+      row.percentage == null ? null : Math.max(0, Math.min(100, Number(row.percentage) || 0)),
+    passed: row.passed == null ? null : Boolean(Number(row.passed)),
     attemptSubmittedAt: row.attempt_submitted_at ?? null,
     grantedAt: row.granted_at ?? null,
     updatedAt: row.updated_at ?? null,
@@ -519,6 +558,78 @@ async function ensureTestSessionTable() {
     );
   }
   await ensureSessionTablePromise;
+}
+
+async function ensureTestAttemptTable() {
+  if (!ensureAttemptTablePromise) {
+    ensureAttemptTablePromise = (async () => {
+      await query(
+        "CREATE TABLE IF NOT EXISTS test_attempts (id CHAR(36) PRIMARY KEY, test_id CHAR(36) NOT NULL, student_id CHAR(36) NOT NULL, attempt_number INT NOT NULL DEFAULT 1, answers JSON NOT NULL, question_order JSON NULL, option_orders JSON NULL, score INT NOT NULL, correct_count INT NOT NULL DEFAULT 0, question_count INT NOT NULL DEFAULT 0, percentage INT NOT NULL DEFAULT 0, passed TINYINT(1) NOT NULL DEFAULT 0, submitted_at DATETIME NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (test_id) REFERENCES tests(id), FOREIGN KEY (student_id) REFERENCES users(id))"
+      );
+
+      const columns = await query("SHOW COLUMNS FROM test_attempts");
+      const columnNames = new Set(columns.map((column) => column.Field));
+      const alterStatements = [];
+
+      if (!columnNames.has("attempt_number")) {
+        alterStatements.push(
+          "ADD COLUMN attempt_number INT NOT NULL DEFAULT 1 AFTER student_id"
+        );
+      }
+      if (!columnNames.has("question_order")) {
+        alterStatements.push("ADD COLUMN question_order JSON NULL AFTER answers");
+      }
+      if (!columnNames.has("option_orders")) {
+        alterStatements.push("ADD COLUMN option_orders JSON NULL AFTER question_order");
+      }
+      if (!columnNames.has("correct_count")) {
+        alterStatements.push(
+          "ADD COLUMN correct_count INT NOT NULL DEFAULT 0 AFTER score"
+        );
+      }
+      if (!columnNames.has("question_count")) {
+        alterStatements.push(
+          "ADD COLUMN question_count INT NOT NULL DEFAULT 0 AFTER correct_count"
+        );
+      }
+      if (!columnNames.has("percentage")) {
+        alterStatements.push("ADD COLUMN percentage INT NOT NULL DEFAULT 0 AFTER question_count");
+      }
+      if (!columnNames.has("passed")) {
+        alterStatements.push("ADD COLUMN passed TINYINT(1) NOT NULL DEFAULT 0 AFTER percentage");
+      }
+
+      if (alterStatements.length) {
+        await query(`ALTER TABLE test_attempts ${alterStatements.join(", ")}`);
+      }
+
+      const indexes = await query("SHOW INDEX FROM test_attempts");
+      const indexNames = new Set(indexes.map((index) => index.Key_name));
+      const followUpStatements = [];
+
+      if (indexNames.has("uq_test_attempt")) {
+        followUpStatements.push("DROP INDEX uq_test_attempt");
+      }
+      if (!indexNames.has("uq_test_attempt_number")) {
+        followUpStatements.push(
+          "ADD UNIQUE INDEX uq_test_attempt_number (test_id, student_id, attempt_number)"
+        );
+      }
+      if (!indexNames.has("idx_test_attempts_lookup")) {
+        followUpStatements.push(
+          "ADD INDEX idx_test_attempts_lookup (test_id, student_id, submitted_at)"
+        );
+      }
+
+      if (followUpStatements.length) {
+        await query(`ALTER TABLE test_attempts ${followUpStatements.join(", ")}`);
+      }
+    })().catch((error) => {
+      ensureAttemptTablePromise = null;
+      throw error;
+    });
+  }
+  await ensureAttemptTablePromise;
 }
 
 async function ensureTestPermissionTable() {
@@ -541,7 +652,23 @@ async function getRemainingAttempts(testId, studentId) {
   return Number.isFinite(remainingAttempts) && remainingAttempts > 0 ? remainingAttempts : 0;
 }
 
+function getLatestAttemptJoinSql(alias = "ta") {
+  return `LEFT JOIN (
+    SELECT attempt_rows.*
+    FROM test_attempts attempt_rows
+    INNER JOIN (
+      SELECT test_id, student_id, MAX(attempt_number) AS max_attempt_number
+      FROM test_attempts
+      GROUP BY test_id, student_id
+    ) latest_attempts
+      ON latest_attempts.test_id = attempt_rows.test_id
+     AND latest_attempts.student_id = attempt_rows.student_id
+     AND latest_attempts.max_attempt_number = attempt_rows.attempt_number
+  ) ${alias}`;
+}
+
 async function hasAttempt(testId, studentId) {
+  await ensureTestAttemptTable();
   const rows = await query(
     "SELECT id FROM test_attempts WHERE test_id = ? AND student_id = ? LIMIT 1",
     [testId, studentId]
@@ -549,10 +676,31 @@ async function hasAttempt(testId, studentId) {
   return !!rows[0];
 }
 
+async function getLatestAttemptByStudent(testId, studentId) {
+  await ensureTestAttemptTable();
+  const rows = await query(
+    "SELECT ta.*, u.first_name AS student_first_name, u.last_name AS student_last_name FROM test_attempts ta JOIN users u ON u.id = ta.student_id WHERE ta.test_id = ? AND ta.student_id = ? ORDER BY ta.attempt_number DESC, ta.submitted_at DESC LIMIT 1",
+    [testId, studentId]
+  );
+  return rows[0] ? mapAttempt(rows[0]) : null;
+}
+
+async function listAttemptsByStudent(testId, studentId) {
+  await ensureTestAttemptTable();
+  const rows = await query(
+    "SELECT ta.*, u.first_name AS student_first_name, u.last_name AS student_last_name FROM test_attempts ta JOIN users u ON u.id = ta.student_id WHERE ta.test_id = ? AND ta.student_id = ? ORDER BY ta.attempt_number DESC, ta.submitted_at DESC",
+    [testId, studentId]
+  );
+  return rows.map(mapAttempt);
+}
+
 async function listPermissionsByTest(testId) {
+  await ensureTestAttemptTable();
   await ensureTestPermissionTable();
   const rows = await query(
-    "SELECT u.id AS student_id, u.first_name AS student_first_name, u.last_name AS student_last_name, COALESCE(tp.remaining_attempts, 0) AS remaining_attempts, tp.granted_at, tp.updated_at, ta.score AS attempt_score, ta.submitted_at AS attempt_submitted_at FROM users u LEFT JOIN test_permissions tp ON tp.student_id = u.id AND tp.test_id = ? LEFT JOIN test_attempts ta ON ta.student_id = u.id AND ta.test_id = ? WHERE u.role = 'STUDENT' AND (tp.student_id IS NOT NULL OR ta.id IS NOT NULL) ORDER BY u.first_name ASC, u.last_name ASC",
+    `SELECT u.id AS student_id, u.first_name AS student_first_name, u.last_name AS student_last_name, COALESCE(tp.remaining_attempts, 0) AS remaining_attempts, tp.granted_at, tp.updated_at, ta.attempt_number, ta.score AS attempt_score, ta.correct_count, ta.question_count, ta.percentage, ta.passed, ta.submitted_at AS attempt_submitted_at FROM users u LEFT JOIN test_permissions tp ON tp.student_id = u.id AND tp.test_id = ? ${getLatestAttemptJoinSql(
+      "ta"
+    )} ON ta.student_id = u.id AND ta.test_id = ? WHERE u.role = 'STUDENT' AND (tp.student_id IS NOT NULL OR ta.id IS NOT NULL) ORDER BY u.first_name ASC, u.last_name ASC`,
     [testId, testId]
   );
   return rows.map(mapPermission);
@@ -568,10 +716,68 @@ function shuffleInPlace(values) {
   return values;
 }
 
-function createRandomQuestionOrder(questionCount, sampleSize) {
-  const indices = Array.from({ length: questionCount }, (_, index) => index);
-  shuffleInPlace(indices);
-  return indices.slice(0, sampleSize);
+function normalizeAttemptQuestionOrder(rawOrder, questionCount) {
+  return normalizeQuestionOrder(rawOrder, questionCount, questionCount);
+}
+
+function hasSameQuestionSet(firstOrder, secondOrder) {
+  if (!Array.isArray(firstOrder) || !Array.isArray(secondOrder)) return false;
+  if (firstOrder.length !== secondOrder.length) return false;
+  const firstSet = new Set(firstOrder);
+  if (firstSet.size !== secondOrder.length) return false;
+  return secondOrder.every((index) => firstSet.has(index));
+}
+
+function createRandomQuestionOrder(questionCount, sampleSize, previousQuestionOrders = []) {
+  const safeSampleSize = Math.min(Math.max(0, sampleSize), questionCount);
+  if (safeSampleSize <= 0) return [];
+
+  const normalizedPreviousOrders = Array.isArray(previousQuestionOrders)
+    ? previousQuestionOrders
+        .map((rawOrder) => normalizeAttemptQuestionOrder(rawOrder, questionCount))
+        .filter((order) => order.length > 0)
+    : [];
+  const latestOrder = normalizedPreviousOrders[0] ?? [];
+
+  const frequencies = Array.from({ length: questionCount }, () => 0);
+  normalizedPreviousOrders.forEach((order) => {
+    order.forEach((index) => {
+      if (Number.isInteger(index) && index >= 0 && index < questionCount) {
+        frequencies[index] += 1;
+      }
+    });
+  });
+
+  const buckets = new Map();
+  for (let index = 0; index < questionCount; index += 1) {
+    const frequency = frequencies[index];
+    if (!buckets.has(frequency)) {
+      buckets.set(frequency, []);
+    }
+    buckets.get(frequency).push(index);
+  }
+
+  const rankedIndices = Array.from(buckets.keys())
+    .sort((a, b) => a - b)
+    .flatMap((frequency) => shuffleInPlace([...buckets.get(frequency)]));
+
+  let selected = rankedIndices.slice(0, safeSampleSize);
+
+  if (
+    questionCount > safeSampleSize &&
+    latestOrder.length === safeSampleSize &&
+    hasSameQuestionSet(selected, latestOrder)
+  ) {
+    const selectedSet = new Set(selected);
+    const replacement = rankedIndices.find((index) => !selectedSet.has(index));
+    if (Number.isInteger(replacement)) {
+      const replaceAt = Math.max(0, selected.findIndex((index) => latestOrder.includes(index)));
+      selected = [...selected];
+      selected[replaceAt] = replacement;
+    }
+  }
+
+  return shuffleInPlace([...selected]);
 }
 
 function hashStringSeed(value) {
@@ -813,6 +1019,54 @@ function parseDeviceId(req) {
   return normalized;
 }
 
+async function listAttemptQuestionOrders(testId, studentId) {
+  await ensureTestAttemptTable();
+  const rows = await query(
+    "SELECT question_order FROM test_attempts WHERE test_id = ? AND student_id = ? ORDER BY attempt_number DESC, submitted_at DESC",
+    [testId, studentId]
+  );
+  return rows.map((row) => parseJson(row.question_order, []));
+}
+
+function resolveAttemptSnapshot(attempt, allQuestions) {
+  if (!attempt || !Array.isArray(allQuestions) || allQuestions.length === 0) {
+    return null;
+  }
+
+  const rawQuestionOrder = parseJson(attempt.questionOrder, []);
+  if (!Array.isArray(rawQuestionOrder) || rawQuestionOrder.length === 0) {
+    return null;
+  }
+
+  const sampleSize =
+    Number.isInteger(attempt.questionCount) && attempt.questionCount > 0
+      ? attempt.questionCount
+      : getQuestionSampleSize(allQuestions.length);
+  const questionOrder = normalizeQuestionOrder(
+    rawQuestionOrder,
+    allQuestions.length,
+    Math.min(sampleSize, allQuestions.length)
+  );
+  const selectedQuestions = questionOrder.map((index) => allQuestions[index]).filter(Boolean);
+  if (!selectedQuestions.length) {
+    return null;
+  }
+  const optionOrders = resolveOptionOrdersForQuestions(
+    parseJson(attempt.optionOrders, []),
+    selectedQuestions,
+    attempt.id
+  );
+  const presentedQuestions = selectedQuestions.map((question, index) =>
+    applyOptionOrderToQuestion(question, optionOrders[index])
+  );
+
+  return {
+    selectedQuestions,
+    presentedQuestions,
+    optionOrders,
+  };
+}
+
 async function getOrCreateTestSession({
   testId,
   studentId,
@@ -831,7 +1085,12 @@ async function getOrCreateTestSession({
   const existing = rows[0];
 
   if (!existing) {
-    const questionOrder = createRandomQuestionOrder(questionCount, sampleSize);
+    const previousQuestionOrders = await listAttemptQuestionOrders(testId, studentId);
+    const questionOrder = createRandomQuestionOrder(
+      questionCount,
+      sampleSize,
+      previousQuestionOrders
+    );
     const optionOrders = [];
     const sessionState = createSessionQuestionState(questionOrder, optionOrders);
     const id = uuid();
@@ -920,6 +1179,7 @@ async function resolveStudentQuestionSet(req, res, test, allQuestions, settings)
   );
 
   return {
+    questionOrder: session.questionOrder,
     selectedQuestions,
     presentedQuestions,
     optionOrders,
@@ -931,10 +1191,22 @@ async function resolveStudentQuestionSet(req, res, test, allQuestions, settings)
 
 async function getTestById(id) {
   const rows = await query(
-    "SELECT t.*, u.first_name AS teacher_first_name, u.last_name AS teacher_last_name FROM tests t JOIN users u ON u.id = t.teacher_id WHERE t.id = ?",
+    "SELECT t.*, u.first_name AS teacher_first_name, u.last_name AS teacher_last_name, (SELECT COUNT(*) FROM test_attempts ta WHERE ta.test_id = t.id) AS attempt_count FROM tests t JOIN users u ON u.id = t.teacher_id WHERE t.id = ?",
     [id]
   );
   return rows[0];
+}
+
+function canManageTest(test, user) {
+  if (!test || !user || user.role !== "TEACHER") return false;
+  return test.teacher_id === user.sub;
+}
+
+async function clearTestTransientState(testId) {
+  await ensureTestSessionTable();
+  await ensureTestPermissionTable();
+  await query("DELETE FROM test_sessions WHERE test_id = ?", [testId]);
+  await query("DELETE FROM test_permissions WHERE test_id = ?", [testId]);
 }
 
 async function canStudentAccessTest(test, studentId) {
@@ -1001,14 +1273,105 @@ router.post("/", requireAuth, requireRole("TEACHER"), async (req, res, next) => 
   }
 });
 
+router.put("/:id", requireAuth, requireRole("TEACHER"), async (req, res, next) => {
+  try {
+    const test = await getTestById(req.params.id);
+    if (!test) return res.status(404).json({ message: "Test topilmadi" });
+    if (!canManageTest(test, req.user)) {
+      return res.status(403).json({ message: "Ruxsat yo'q" });
+    }
+
+    const body = createSchema.parse(req.body);
+    const normalizedQuestions = parseQuestions(body.questions);
+    if (!normalizedQuestions.length) {
+      return res.status(400).json({ message: "Kamida bitta yaroqli savol bo'lishi kerak." });
+    }
+
+    const settings = normalizeRuntimeTestSettings(
+      {
+        questionSampleSize: body.questionSampleSize,
+        timeLimitMinutes: body.timeLimitMinutes,
+      },
+      normalizedQuestions.length
+    );
+
+    const nextQuestionsPayload = createQuestionsPayload(normalizedQuestions, settings);
+    const currentQuestionsPayload = parseJson(test.questions, []);
+    const progressAffectingChange =
+      JSON.stringify(currentQuestionsPayload) !== JSON.stringify(nextQuestionsPayload) ||
+      Number(test.max_score) !== Number(body.maxScore) ||
+      (test.target_type ?? null) !== (body.targetType ?? null) ||
+      (test.target_id ?? null) !== (body.targetId ?? null);
+
+    if (Number(test.attempt_count || 0) > 0 && progressAffectingChange) {
+      return res.status(409).json({
+        message:
+          "Bu testda talabalar urinishlari mavjud. Savollar, ball yoki qamrovni o'zgartirish uchun yangi test yarating.",
+      });
+    }
+
+    await query(
+      "UPDATE tests SET subject_id = ?, title = ?, description = ?, deadline = ?, max_score = ?, questions = ?, target_type = ?, target_id = ? WHERE id = ?",
+      [
+        body.subjectId ?? null,
+        body.title,
+        body.description,
+        new Date(body.deadline),
+        body.maxScore,
+        JSON.stringify(nextQuestionsPayload),
+        body.targetType ?? null,
+        body.targetId ?? null,
+        req.params.id,
+      ]
+    );
+
+    if (progressAffectingChange) {
+      await clearTestTransientState(req.params.id);
+    }
+
+    const updated = await getTestById(req.params.id);
+    res.json(mapTest(updated, true));
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get("/available", requireAuth, requireRole("STUDENT"), async (req, res, next) => {
   try {
+    await ensureTestAttemptTable();
     await ensureTestPermissionTable();
+    await ensureTestSessionTable();
+    const deviceId = parseDeviceId(req);
     const rows = await query(
-      "SELECT t.*, u.first_name AS teacher_first_name, u.last_name AS teacher_last_name, ta.id AS attempt_id, ta.score AS attempt_score, ta.submitted_at AS attempt_submitted_at, COALESCE(tp.remaining_attempts, 0) AS permission_remaining_attempts FROM tests t JOIN users u ON u.id = t.teacher_id LEFT JOIN test_permissions tp ON tp.test_id = t.id AND tp.student_id = ? LEFT JOIN group_members gm ON gm.group_id = t.target_id AND gm.student_id = ? LEFT JOIN test_attempts ta ON ta.test_id = t.id AND ta.student_id = ? WHERE ((t.target_type IS NULL) OR (t.target_type = 'GROUP' AND gm.student_id IS NOT NULL) OR (t.target_type = 'STUDENT' AND t.target_id = ?)) AND (COALESCE(tp.remaining_attempts, 0) > 0 OR ta.id IS NOT NULL) ORDER BY t.created_at DESC",
-      [req.user.sub, req.user.sub, req.user.sub, req.user.sub]
+      `SELECT t.*, u.first_name AS teacher_first_name, u.last_name AS teacher_last_name, ta.id AS attempt_id, ta.attempt_number, ta.score AS attempt_score, ta.correct_count, ta.question_count, ta.percentage, ta.passed, ta.submitted_at AS attempt_submitted_at, COALESCE(tp.remaining_attempts, 0) AS permission_remaining_attempts, ts.started_at AS session_started_at, ts.device_id AS session_device_id FROM tests t JOIN users u ON u.id = t.teacher_id LEFT JOIN test_permissions tp ON tp.test_id = t.id AND tp.student_id = ? LEFT JOIN group_members gm ON gm.group_id = t.target_id AND gm.student_id = ? LEFT JOIN test_sessions ts ON ts.test_id = t.id AND ts.student_id = ? ${getLatestAttemptJoinSql(
+        "ta"
+      )} ON ta.test_id = t.id AND ta.student_id = ? WHERE ((t.target_type IS NULL) OR (t.target_type = 'GROUP' AND gm.student_id IS NOT NULL) OR (t.target_type = 'STUDENT' AND t.target_id = ?)) AND (COALESCE(tp.remaining_attempts, 0) > 0 OR ta.id IS NOT NULL) ORDER BY t.created_at DESC`,
+      [req.user.sub, req.user.sub, req.user.sub, req.user.sub, req.user.sub]
     );
-    res.json(rows.map((row) => mapTest(row, false)));
+    res.json(
+      rows.map((row) => {
+        const allQuestions = parseQuestions(row.questions);
+        const settings = parseTestSettings(row.questions, allQuestions.length);
+        const sessionStartedAt = row.session_started_at ? new Date(row.session_started_at) : null;
+        const timeRemainingSeconds = calculateTimeRemainingSeconds(
+          sessionStartedAt,
+          settings.timeLimitMinutes
+        );
+        const entryBlockedReason =
+          row.session_device_id && deviceId && row.session_device_id !== deviceId
+            ? "Bu test boshqa qurilmada boshlangan. Faqat o'sha qurilmadan davom eting."
+            : typeof timeRemainingSeconds === "number" && timeRemainingSeconds <= 0
+            ? getExpiredTimeLimitMessage()
+            : undefined;
+
+        return mapTest(row, false, {
+          allQuestions,
+          settings,
+          timeRemainingSeconds: timeRemainingSeconds ?? undefined,
+          entryBlockedReason,
+        });
+      })
+    );
   } catch (err) {
     next(err);
   }
@@ -1021,31 +1384,36 @@ router.get("/:id/my-attempt", requireAuth, requireRole("STUDENT"), async (req, r
 
     const allowed = await canStudentAccessTest(test, req.user.sub);
     if (!allowed) return res.status(403).json({ message: "Ruxsat yo'q" });
-    const remainingAttempts = await getRemainingAttempts(req.params.id, req.user.sub);
-    const attemptExists = await hasAttempt(req.params.id, req.user.sub);
-    if (!attemptExists && remainingAttempts <= 0) {
-      return res.status(403).json({
-        message: "Hozircha bu test uchun o'qituvchi ruxsat bermagan. O'qituvchingizga murojaat qiling.",
-      });
-    }
+
+    const mappedAttempt = await getLatestAttemptByStudent(req.params.id, req.user.sub);
+    if (!mappedAttempt) return res.json(null);
 
     const allQuestions = parseQuestions(test.questions);
-    const settings = parseTestSettings(test.questions, allQuestions.length);
-    const resolved = await resolveStudentQuestionSet(req, res, test, allQuestions, settings);
-    if (!resolved) return;
+    const snapshot = resolveAttemptSnapshot(mappedAttempt, allQuestions);
+    if (snapshot) {
+      mappedAttempt.answers = mapStoredAnswersToPresented(
+        mappedAttempt.answers,
+        snapshot.selectedQuestions,
+        snapshot.optionOrders
+      );
+    }
 
-    const rows = await query(
-      "SELECT ta.*, u.first_name AS student_first_name, u.last_name AS student_last_name FROM test_attempts ta JOIN users u ON u.id = ta.student_id WHERE ta.test_id = ? AND ta.student_id = ?",
-      [req.params.id, req.user.sub]
-    );
-    if (!rows[0]) return res.json(null);
-    const mappedAttempt = mapAttempt(rows[0]);
-    mappedAttempt.answers = mapStoredAnswersToPresented(
-      mappedAttempt.answers,
-      resolved.selectedQuestions,
-      resolved.optionOrders
-    );
     res.json(mappedAttempt);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/:id/my-attempts", requireAuth, requireRole("STUDENT"), async (req, res, next) => {
+  try {
+    const test = await getTestById(req.params.id);
+    if (!test) return res.status(404).json({ message: "Test topilmadi" });
+
+    const allowed = await canStudentAccessTest(test, req.user.sub);
+    if (!allowed) return res.status(403).json({ message: "Ruxsat yo'q" });
+
+    const attempts = await listAttemptsByStudent(req.params.id, req.user.sub);
+    res.json(attempts);
   } catch (err) {
     next(err);
   }
@@ -1055,9 +1423,10 @@ router.get("/:id/attempts", requireAuth, requireRole("TEACHER"), async (req, res
   try {
     const test = await getTestById(req.params.id);
     if (!test) return res.status(404).json({ message: "Test topilmadi" });
-    if (test.teacher_id !== req.user.sub) return res.status(403).json({ message: "Ruxsat yo'q" });
+    if (!canManageTest(test, req.user)) return res.status(403).json({ message: "Ruxsat yo'q" });
+    await ensureTestAttemptTable();
     const rows = await query(
-      "SELECT ta.*, u.first_name AS student_first_name, u.last_name AS student_last_name FROM test_attempts ta JOIN users u ON u.id = ta.student_id WHERE ta.test_id = ? ORDER BY ta.submitted_at DESC",
+      "SELECT ta.*, u.first_name AS student_first_name, u.last_name AS student_last_name FROM test_attempts ta JOIN users u ON u.id = ta.student_id WHERE ta.test_id = ? ORDER BY ta.submitted_at DESC, ta.attempt_number DESC",
       [req.params.id]
     );
     res.json(rows.map(mapAttempt));
@@ -1070,7 +1439,7 @@ router.get("/:id/permissions", requireAuth, requireRole("TEACHER"), async (req, 
   try {
     const test = await getTestById(req.params.id);
     if (!test) return res.status(404).json({ message: "Test topilmadi" });
-    if (test.teacher_id !== req.user.sub) return res.status(403).json({ message: "Ruxsat yo'q" });
+    if (!canManageTest(test, req.user)) return res.status(403).json({ message: "Ruxsat yo'q" });
     const permissions = await listPermissionsByTest(req.params.id);
     res.json(permissions);
   } catch (err) {
@@ -1086,7 +1455,7 @@ router.post(
     try {
       const test = await getTestById(req.params.id);
       if (!test) return res.status(404).json({ message: "Test topilmadi" });
-      if (test.teacher_id !== req.user.sub) return res.status(403).json({ message: "Ruxsat yo'q" });
+      if (!canManageTest(test, req.user)) return res.status(403).json({ message: "Ruxsat yo'q" });
 
       const body = grantPermissionSchema.parse(req.body);
       const studentRows = await query("SELECT id FROM users WHERE id = ? AND role = 'STUDENT'", [
@@ -1095,6 +1464,8 @@ router.post(
       if (!studentRows[0]) return res.status(404).json({ message: "Talaba topilmadi" });
 
       await ensureTestPermissionTable();
+      await ensureTestAttemptTable();
+      await ensureTestSessionTable();
       const now = new Date();
       const id = uuid();
       await query(
@@ -1107,7 +1478,9 @@ router.post(
       ]);
 
       const rows = await query(
-        "SELECT u.id AS student_id, u.first_name AS student_first_name, u.last_name AS student_last_name, COALESCE(tp.remaining_attempts, 0) AS remaining_attempts, tp.granted_at, tp.updated_at, ta.score AS attempt_score, ta.submitted_at AS attempt_submitted_at FROM users u LEFT JOIN test_permissions tp ON tp.student_id = u.id AND tp.test_id = ? LEFT JOIN test_attempts ta ON ta.student_id = u.id AND ta.test_id = ? WHERE u.id = ? LIMIT 1",
+        `SELECT u.id AS student_id, u.first_name AS student_first_name, u.last_name AS student_last_name, COALESCE(tp.remaining_attempts, 0) AS remaining_attempts, tp.granted_at, tp.updated_at, ta.attempt_number, ta.score AS attempt_score, ta.correct_count, ta.question_count, ta.percentage, ta.passed, ta.submitted_at AS attempt_submitted_at FROM users u LEFT JOIN test_permissions tp ON tp.student_id = u.id AND tp.test_id = ? ${getLatestAttemptJoinSql(
+          "ta"
+        )} ON ta.student_id = u.id AND ta.test_id = ? WHERE u.id = ? LIMIT 1`,
         [req.params.id, req.params.id, body.studentId]
       );
       if (!rows[0]) return res.status(404).json({ message: "Talaba topilmadi" });
@@ -1178,24 +1551,29 @@ router.post("/:id/submit", requireAuth, requireRole("STUDENT"), async (req, res,
       return convertPresentedAnswerToStored(question, answer, resolved.optionOrders[index]);
     });
 
+    await ensureTestAttemptTable();
     const totalPoints =
       originalQuestions.reduce((sum, question) => sum + Number(question.points || 0), 0) || 1;
-    const earnedPoints = originalQuestions.reduce((sum, question, index) => {
+    const scoring = originalQuestions.reduce(
+      (summary, question, index) => {
       const answer = storedAnswers[index];
       if (question.type === "text") {
         if (typeof answer === "string" && typeof question.correctText === "string") {
           const normalizedAnswer = normalizeAnswerTextForCompare(answer);
           const normalizedCorrect = normalizeAnswerTextForCompare(question.correctText);
           if (normalizedAnswer && normalizedAnswer === normalizedCorrect) {
-            return sum + Number(question.points || 0);
+              return {
+                earnedPoints: summary.earnedPoints + Number(question.points || 0),
+                correctCount: summary.correctCount + 1,
+              };
           }
         }
-        return sum;
+          return summary;
       }
 
       if (question.type === "multi") {
         if (!Array.isArray(answer) || !answer.length || !Array.isArray(question.correctOptions)) {
-          return sum;
+            return summary;
         }
         const normalizedCorrectOptions = Array.from(
           new Set(
@@ -1208,59 +1586,93 @@ router.post("/:id/submit", requireAuth, requireRole("STUDENT"), async (req, res,
           normalizedCorrectOptions.length === answer.length &&
           normalizedCorrectOptions.every((value, valueIndex) => value === answer[valueIndex])
         ) {
-          return sum + Number(question.points || 0);
+            return {
+              earnedPoints: summary.earnedPoints + Number(question.points || 0),
+              correctCount: summary.correctCount + 1,
+            };
         }
-        return sum;
+          return summary;
       }
 
       if (answer === question.correctOption) {
-        return sum + Number(question.points || 0);
+          return {
+            earnedPoints: summary.earnedPoints + Number(question.points || 0),
+            correctCount: summary.correctCount + 1,
+          };
       }
-      return sum;
-    }, 0);
-    const score = Math.round((earnedPoints / totalPoints) * Number(test.max_score || 100));
-    const submittedAt = new Date();
-
-    const existing = await query(
-      "SELECT id FROM test_attempts WHERE test_id = ? AND student_id = ?",
-      [req.params.id, req.user.sub]
+        return summary;
+      },
+      { earnedPoints: 0, correctCount: 0 }
     );
-    if (existing[0]) {
-      await query(
-        "UPDATE test_attempts SET answers = ?, score = ?, submitted_at = ? WHERE id = ?",
-        [JSON.stringify(storedAnswers), score, submittedAt, existing[0].id]
-      );
-      await query(
-        "UPDATE test_permissions SET remaining_attempts = GREATEST(remaining_attempts - 1, 0), updated_at = ? WHERE test_id = ? AND student_id = ?",
-        [submittedAt, req.params.id, req.user.sub]
-      );
-      return res.json({
-        id: existing[0].id,
-        testId: req.params.id,
-        studentId: req.user.sub,
-        answers: normalizedPresentedAnswers,
-        score,
-        submittedAt,
-      });
-    }
+    const questionCount = originalQuestions.length;
+    const percentage = Math.max(
+      0,
+      Math.min(100, Math.round((scoring.earnedPoints / totalPoints) * 100))
+    );
+    const passed = percentage >= PASSING_PERCENTAGE;
+    const score = Math.round((scoring.earnedPoints / totalPoints) * Number(test.max_score || 100));
+    const submittedAt = new Date();
+    const latestAttempt = await getLatestAttemptByStudent(req.params.id, req.user.sub);
+    const nextAttemptNumber = (latestAttempt?.attemptNumber ?? 0) + 1;
 
     const id = uuid();
     await query(
-      "INSERT INTO test_attempts (id, test_id, student_id, answers, score, submitted_at) VALUES (?,?,?,?,?,?)",
-      [id, req.params.id, req.user.sub, JSON.stringify(storedAnswers), score, submittedAt]
+      "INSERT INTO test_attempts (id, test_id, student_id, attempt_number, answers, question_order, option_orders, score, correct_count, question_count, percentage, passed, submitted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      [
+        id,
+        req.params.id,
+        req.user.sub,
+        nextAttemptNumber,
+        JSON.stringify(storedAnswers),
+        JSON.stringify(resolved.questionOrder ?? resolved.selectedQuestions.map((_, index) => index)),
+        JSON.stringify(resolved.optionOrders),
+        score,
+        scoring.correctCount,
+        questionCount,
+        percentage,
+        passed ? 1 : 0,
+        submittedAt,
+      ]
     );
     await query(
       "UPDATE test_permissions SET remaining_attempts = GREATEST(remaining_attempts - 1, 0), updated_at = ? WHERE test_id = ? AND student_id = ?",
       [submittedAt, req.params.id, req.user.sub]
     );
+    await query("DELETE FROM test_sessions WHERE test_id = ? AND student_id = ?", [
+      req.params.id,
+      req.user.sub,
+    ]);
     res.json({
       id,
       testId: req.params.id,
       studentId: req.user.sub,
       answers: normalizedPresentedAnswers,
       score,
+      attemptNumber: nextAttemptNumber,
+      correctCount: scoring.correctCount,
+      questionCount,
+      percentage,
+      passed,
       submittedAt,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete("/:id", requireAuth, requireRole("TEACHER"), async (req, res, next) => {
+  try {
+    const test = await getTestById(req.params.id);
+    if (!test) return res.status(404).json({ message: "Test topilmadi" });
+    if (!canManageTest(test, req.user)) {
+      return res.status(403).json({ message: "Ruxsat yo'q" });
+    }
+
+    await clearTestTransientState(req.params.id);
+    await query("DELETE FROM test_attempts WHERE test_id = ?", [req.params.id]);
+    await query("DELETE FROM tests WHERE id = ?", [req.params.id]);
+
+    res.json({ ok: true });
   } catch (err) {
     next(err);
   }
@@ -1275,7 +1687,7 @@ router.get("/:id", requireAuth, async (req, res, next) => {
     const settings = parseTestSettings(test.questions, allQuestions.length);
 
     if (req.user.role === "TEACHER") {
-      if (test.teacher_id !== req.user.sub) return res.status(403).json({ message: "Ruxsat yo'q" });
+      if (!canManageTest(test, req.user)) return res.status(403).json({ message: "Ruxsat yo'q" });
       return res.json(mapTest(test, true, { allQuestions, settings }));
     }
 
@@ -1289,8 +1701,23 @@ router.get("/:id", requireAuth, async (req, res, next) => {
       });
     }
 
+    if (remainingAttempts <= 0) {
+      return res.json(
+        mapTest(test, false, {
+          allQuestions,
+          settings,
+          selectedQuestions: [],
+          questionSampleSize: 0,
+          permissionRemainingAttempts: remainingAttempts,
+        })
+      );
+    }
+
     const resolved = await resolveStudentQuestionSet(req, res, test, allQuestions, settings);
     if (!resolved) return;
+    if (typeof resolved.timeRemainingSeconds === "number" && resolved.timeRemainingSeconds <= 0) {
+      return res.status(403).json({ message: getExpiredTimeLimitMessage() });
+    }
 
     res.json(
       mapTest(test, false, {

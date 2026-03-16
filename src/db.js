@@ -10,9 +10,36 @@ const pool = mysql.createPool({
   connectionLimit: 10,
 });
 
-async function query(sql, params = []) {
-  const [rows] = await pool.execute(sql, params);
-  return rows;
+const DATABASE_CONNECTION_ERROR_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "ETIMEDOUT",
+  "EHOSTUNREACH",
+  "PROTOCOL_CONNECTION_LOST",
+]);
+
+function isDatabaseConnectionError(err) {
+  return DATABASE_CONNECTION_ERROR_CODES.has(err?.code);
 }
 
-module.exports = { pool, query };
+async function query(sql, params = []) {
+  try {
+    const [rows] = await pool.execute(sql, params);
+    return rows;
+  } catch (err) {
+    err.isDatabaseConnectionError = isDatabaseConnectionError(err);
+    throw err;
+  }
+}
+
+async function ping() {
+  const connection = await pool.getConnection();
+  try {
+    await connection.ping();
+  } finally {
+    connection.release();
+  }
+}
+
+module.exports = { pool, query, ping, isDatabaseConnectionError };
