@@ -16,6 +16,7 @@ const lessonRoutes = require("./routes/lessons");
 const assignmentRoutes = require("./routes/assignments");
 const testRoutes = require("./routes/tests");
 const surveyRoutes = require("./routes/surveys");
+const adaptiveQuizRoutes = require("./routes/adaptive-quiz");
 const teacherRoutes = require("./routes/teacher");
 const studentRoutes = require("./routes/student");
 const userRoutes = require("./routes/users");
@@ -43,6 +44,7 @@ app.use("/api/lessons", lessonRoutes);
 app.use("/api/assignments", assignmentRoutes);
 app.use("/api/tests", testRoutes);
 app.use("/api/surveys", surveyRoutes);
+app.use("/api/adaptive-quiz", adaptiveQuizRoutes);
 app.use("/api/teacher", teacherRoutes);
 app.use("/api/student", studentRoutes);
 

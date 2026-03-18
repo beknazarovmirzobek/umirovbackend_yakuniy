@@ -19,6 +19,9 @@ function parseBoolean(value, defaultValue = false) {
   return defaultValue;
 }
 
+const LOCKED_ADAPTIVE_QUIZ_TOPIC =
+  "AXBOROTLI TA'LIM MUHITIDA AMALIY MASHG'ULOTLARNI O'TISH METODIKASI";
+
 const config = {
   port: process.env.PORT || 4000,
   db: {
@@ -42,6 +45,17 @@ const config = {
     pollingEnabled: parseBoolean(process.env.TELEGRAM_BOT_POLLING_ENABLED, true),
     pollIntervalMs: Number(process.env.TELEGRAM_BOT_POLL_INTERVAL_MS || 1500),
     commandKey: process.env.TELEGRAM_BOT_COMMAND_KEY || "@umirov",
+  },
+  adaptiveQuiz: {
+    provider: "gemini",
+    courseTitle: LOCKED_ADAPTIVE_QUIZ_TOPIC,
+    lockedTopic: LOCKED_ADAPTIVE_QUIZ_TOPIC,
+    geminiApiKey: process.env.GEMINI_API_KEY || "",
+    geminiModel: process.env.GEMINI_MODEL || "gemini-2.5-flash",
+    requestTimeoutMs: Number(process.env.GEMINI_TIMEOUT_MS || 25000),
+    minDifficulty: 1,
+    maxDifficulty: 5,
+    startDifficulty: 2,
   },
 };
 
