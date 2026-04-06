@@ -3,7 +3,7 @@ const bcrypt = require("bcryptjs");
 const { z } = require("zod");
 const { v4: uuid } = require("uuid");
 
-const { query } = require("../db");
+const { pool, query } = require("../db");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { upsertStudentCredential } = require("../services/studentCredentials");
 const { sendNewStudentNotification } = require("../services/telegramBot");
@@ -23,11 +23,44 @@ const createStudentSchema = z.object({
   username: z.string().min(1),
   password: z.string().min(6),
 });
+const updateStudentSchema = createStudentSchema.omit({ password: true });
 
 const groupSchema = z.object({
   name: z.string().min(1),
   code: z.string().min(1),
 });
+
+function mapPublicUser(user) {
+  return {
+    id: user.id,
+    username: user.username,
+    role: user.role,
+    firstName: user.first_name,
+    lastName: user.last_name,
+    mustChangePassword: !!user.must_change_password,
+    createdAt: user.created_at,
+  };
+}
+
+async function getStudentRow(studentId) {
+  const users = await query("SELECT * FROM users WHERE id = ? AND role = 'STUDENT'", [studentId]);
+  return users[0] || null;
+}
+
+async function deleteAdaptiveQuizRows(execute, studentId) {
+  for (const statement of [
+    "DELETE FROM adaptive_quiz_sessions WHERE user_id = ?",
+    "DELETE FROM adaptive_quiz_answer_logs WHERE user_id = ?",
+  ]) {
+    try {
+      await execute(statement, [studentId]);
+    } catch (err) {
+      if (err?.code !== "ER_NO_SUCH_TABLE") {
+        throw err;
+      }
+    }
+  }
+}
 
 router.get("/students", requireAuth, requireRole("TEACHER"), async (req, res, next) => {
   try {
@@ -38,30 +71,12 @@ router.get("/students", requireAuth, requireRole("TEACHER"), async (req, res, ne
         [groupId]
       );
       return res.json(
-        rows.map((u) => ({
-          id: u.id,
-          username: u.username,
-          role: u.role,
-          firstName: u.first_name,
-          lastName: u.last_name,
-          mustChangePassword: !!u.must_change_password,
-          createdAt: u.created_at,
-        }))
+        rows.map(mapPublicUser)
       );
     }
 
     const rows = await query("SELECT * FROM users WHERE role = 'STUDENT'");
-    res.json(
-      rows.map((u) => ({
-        id: u.id,
-        username: u.username,
-        role: u.role,
-        firstName: u.first_name,
-        lastName: u.last_name,
-        mustChangePassword: !!u.must_change_password,
-        createdAt: u.created_at,
-      }))
-    );
+    res.json(rows.map(mapPublicUser));
   } catch (err) {
     next(err);
   }
@@ -164,15 +179,7 @@ router.get(
         [req.params.id]
       );
       res.json(
-        rows.map((u) => ({
-          id: u.id,
-          username: u.username,
-          role: u.role,
-          firstName: u.first_name,
-          lastName: u.last_name,
-          mustChangePassword: !!u.must_change_password,
-          createdAt: u.created_at,
-        }))
+        rows.map(mapPublicUser)
       );
     } catch (err) {
       next(err);
@@ -252,19 +259,98 @@ router.post("/students", requireAuth, requireRole("TEACHER"), async (req, res, n
       console.error("Yangi talaba uchun Telegram xabar yuborilmadi:", botErr.message);
     });
 
-    res.json({
-      id,
-      username: body.username,
-      role: "STUDENT",
-      firstName: body.firstName,
-      lastName: body.lastName,
-      mustChangePassword: true,
-      createdAt: new Date().toISOString(),
-    });
+    res.json(
+      mapPublicUser({
+        id,
+        username: body.username,
+        role: "STUDENT",
+        first_name: body.firstName,
+        last_name: body.lastName,
+        must_change_password: 1,
+        created_at: new Date().toISOString(),
+      })
+    );
   } catch (err) {
     next(err);
   }
 });
+
+router.put(
+  "/students/:id",
+  requireAuth,
+  requireRole("TEACHER"),
+  async (req, res, next) => {
+    try {
+      const body = updateStudentSchema.parse(req.body);
+      const student = await getStudentRow(req.params.id);
+      if (!student) return res.status(404).json({ message: "Student not found" });
+
+      const nextUsername = body.username.trim();
+      const duplicate = await query("SELECT id FROM users WHERE username = ? AND id <> ? LIMIT 1", [
+        nextUsername,
+        student.id,
+      ]);
+      if (duplicate[0]) {
+        return res.status(400).json({ message: "Username already exists" });
+      }
+
+      await query("UPDATE users SET first_name = ?, last_name = ?, username = ? WHERE id = ?", [
+        body.firstName.trim(),
+        body.lastName.trim(),
+        nextUsername,
+        student.id,
+      ]);
+
+      const updated = await getStudentRow(student.id);
+      if (!updated) return res.status(404).json({ message: "Student not found" });
+      res.json(mapPublicUser(updated));
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+router.delete(
+  "/students/:id",
+  requireAuth,
+  requireRole("TEACHER"),
+  async (req, res, next) => {
+    const connection = await pool.getConnection();
+    let transactionStarted = false;
+    try {
+      const student = await getStudentRow(req.params.id);
+      if (!student) return res.status(404).json({ message: "Student not found" });
+
+      const execute = async (sql, params = []) => {
+        await connection.execute(sql, params);
+      };
+
+      await connection.beginTransaction();
+      transactionStarted = true;
+      await execute("DELETE FROM group_members WHERE student_id = ?", [student.id]);
+      await execute("DELETE FROM attendance WHERE student_id = ?", [student.id]);
+      await execute("DELETE FROM submissions WHERE student_id = ?", [student.id]);
+      await execute("DELETE FROM grades WHERE student_id = ?", [student.id]);
+      await execute("DELETE FROM test_attempts WHERE student_id = ?", [student.id]);
+      await execute("DELETE FROM test_sessions WHERE student_id = ?", [student.id]);
+      await execute("DELETE FROM test_permissions WHERE student_id = ?", [student.id]);
+      await execute("DELETE FROM survey_responses WHERE student_id = ?", [student.id]);
+      await execute("DELETE FROM refresh_tokens WHERE user_id = ?", [student.id]);
+      await deleteAdaptiveQuizRows(execute, student.id);
+      await execute("DELETE FROM users WHERE id = ? AND role = 'STUDENT'", [student.id]);
+      await connection.commit();
+
+      res.json({ ok: true });
+    } catch (err) {
+      if (transactionStarted) {
+        await connection.rollback();
+      }
+      next(err);
+    } finally {
+      connection.release();
+    }
+  }
+);
 
 router.post(
   "/students/:id/reset-password",
@@ -285,15 +371,7 @@ router.post(
 
       await upsertStudentCredential(u.id, body.password);
 
-      res.json({
-        id: u.id,
-        username: u.username,
-        role: u.role,
-        firstName: u.first_name,
-        lastName: u.last_name,
-        mustChangePassword: !!u.must_change_password,
-        createdAt: u.created_at,
-      });
+      res.json(mapPublicUser(u));
     } catch (err) {
       next(err);
     }
@@ -306,18 +384,9 @@ router.get(
   requireRole("TEACHER"),
   async (req, res, next) => {
     try {
-      const users = await query("SELECT * FROM users WHERE id = ?", [req.params.id]);
-      const u = users[0];
+      const u = await getStudentRow(req.params.id);
       if (!u) return res.status(404).json({ message: "Student not found" });
-      res.json({
-        id: u.id,
-        username: u.username,
-        role: u.role,
-        firstName: u.first_name,
-        lastName: u.last_name,
-        mustChangePassword: !!u.must_change_password,
-        createdAt: u.created_at,
-      });
+      res.json(mapPublicUser(u));
     } catch (err) {
       next(err);
     }

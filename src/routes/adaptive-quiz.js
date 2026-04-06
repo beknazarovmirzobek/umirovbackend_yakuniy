@@ -226,7 +226,7 @@ router.get("/teacher/stats", requireAuth, requireRole("TEACHER"), async (req, re
     await ensureAdaptiveQuizAnswerLogTable();
     const lockedTopic = getLockedTopic();
     const rows = await query(
-      "SELECT u.id AS student_id, u.username, u.first_name, u.last_name, GROUP_CONCAT(DISTINCT g.name ORDER BY g.name SEPARATOR '||') AS group_names, stats.answer_count, stats.average_score, stats.last_activity_at FROM users u JOIN group_members gm ON gm.student_id = u.id JOIN `groups` g ON g.id = gm.group_id AND g.teacher_id = ? LEFT JOIN (SELECT user_id, COUNT(*) AS answer_count, AVG(score) AS average_score, MAX(created_at) AS last_activity_at FROM adaptive_quiz_answer_logs WHERE topic = ? GROUP BY user_id) stats ON stats.user_id = u.id WHERE u.role = 'STUDENT' GROUP BY u.id, u.username, u.first_name, u.last_name, stats.answer_count, stats.average_score, stats.last_activity_at",
+      "SELECT u.id AS student_id, u.username, u.first_name, u.last_name, GROUP_CONCAT(DISTINCT g.name ORDER BY g.name SEPARATOR '||') AS group_names, stats.answer_count, stats.average_score, stats.last_activity_at FROM users u LEFT JOIN group_members gm ON gm.student_id = u.id LEFT JOIN `groups` g ON g.id = gm.group_id AND g.teacher_id = ? LEFT JOIN (SELECT user_id, COUNT(*) AS answer_count, AVG(score) AS average_score, MAX(created_at) AS last_activity_at FROM adaptive_quiz_answer_logs WHERE topic = ? GROUP BY user_id) stats ON stats.user_id = u.id WHERE u.role = 'STUDENT' GROUP BY u.id, u.username, u.first_name, u.last_name, stats.answer_count, stats.average_score, stats.last_activity_at",
       [req.user.sub, lockedTopic]
     );
 
@@ -246,6 +246,7 @@ router.get("/teacher/stats", requireAuth, requireRole("TEACHER"), async (req, re
             ? new Date(row.last_activity_at).toISOString()
             : null,
       }))
+      .filter((item) => item.answerCount > 0)
       .sort((left, right) => {
         if (right.answerCount !== left.answerCount) {
           return right.answerCount - left.answerCount;
@@ -268,7 +269,7 @@ router.get("/teacher/stats", requireAuth, requireRole("TEACHER"), async (req, re
       courseTitle: lockedTopic,
       summary: {
         studentCount: students.length,
-        activeStudentCount: students.filter((item) => item.answerCount > 0).length,
+        activeStudentCount: students.length,
         totalAnswers,
         averageScore: totalAnswers ? Math.round(weightedScoreSum / totalAnswers) : null,
       },
